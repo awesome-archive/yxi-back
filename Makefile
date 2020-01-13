@@ -2,47 +2,47 @@ GOFMT ?= gofmt "-s"
 PACKAGES ?= $(shell go list ./... | grep -v /vendor/)
 GOFILES := $(shell find . -name "*.go" -type f -not -path "./vendor/*")
 
-all: build
+help:
+	@grep -P '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-30s\033[0m %s\n", $$1, $$2}'
+
+all: api runners ## build all images and run in docker
+	docker run -it --rm -p 8090:8090 -v "/var/run/docker.sock:/var/run/docker.sock" yximages/yxi-api
 
 .PHONY: fmt
-fmt:
+fmt: ## formate all go files (use go)
 	$(GOFMT) -w $(GOFILES)
 
-.PHONY: test
-test:
-	go test
+.PHONY: dev
+dev:fmt vet ## formate vet and compile (use go)
+	go build -mod=vendor -ldflags '-w -s' -o main cmd/apiServer/main.go
 
-.PHONY: build
-build:deps fmt
-	govendor sync
-	GOOS=linux GOARCH=amd64 go build -ldflags '-w -s' -o main cmd/apiServer/main.go
-
-vet:
+vet: ## vat all go files (use go)
 	go vet $(PACKAGES)
 
-deps:
-	@hash govendor > /dev/null 2>&1; if [ $$? -ne 0 ]; then \
-		go get -u github.com/kardianos/govendor; \
-	fi
+test: ## run test (use go)
+	go test -v -mod=vendor ./...
 
-.PHONY: misspell-check
-misspell-check:
-	@hash misspell > /dev/null 2>&1; if [ $$? -ne 0 ]; then \
-		go get -u github.com/client9/misspell/cmd/misspell; \
-	fi
-	misspell -error $(GOFILES)
+api: ## build api image
+	docker build -t yximages/yxi-api .
 
-buildapi:
-	docker build -t keller0/yxi-api .
+drun: api ## build api image and run it
+	docker run -it --rm -p 8090:8090 -v "/var/run/docker.sock:/var/run/docker.sock" yximages/yxi-api
 
-dbuild:
-	docker run -it --rm -v `pwd`:/go/src/github.com/keller0/yxi-back \
-	-w /go/src/github.com/keller0/yxi-back golang:1.8 \
-	go build -ldflags '-w -s' -o main cmd/apiServer/main.go
+runners: ## build runner images
+	cd scripts && ./images.sh -b
 
-buildimages:
-	cd scripts && ./build_images.sh
+push: ## push runner images to docker hub
+	cd scripts && ./images.sh -d
 
-clean:
+pull: ## pull runner images from docker hub
+	cd scripts && ./images.sh -p
+
+pullali: ## pull runner images from aliyun
+	cd scripts && ./images.sh -l
+
+pushali: ## push runner images to aliyun
+	cd scripts && ./images.sh -a
+
+clean: ## clean local build
 	rm ./main
 

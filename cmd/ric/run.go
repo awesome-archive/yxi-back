@@ -22,15 +22,6 @@ var supportedLanguage = []string{
 	"rust",
 }
 
-var cLanguage = []string{
-	"c",
-	"cpp",
-	"go",
-	"java",
-	"scala",
-	"rust",
-}
-
 func goRun(workDir, stdin string, args ...string) (string, string, error) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -45,89 +36,26 @@ func goRun(workDir, stdin string, args ...string) (string, string, error) {
 	return stdout.String(), stderr.String(), err
 }
 
-// Run will run payload, if the language need compille
-// it will call CompileAndRun()
-func (ar *PayLoad) Run() {
-
-	if len(ar.A.Run) == 0 {
-		if ar.L == "haskell" {
-			ar.A.Run = []string{"runhaskell"}
-		} else {
-			ar.A.Run = []string{ar.L}
-		}
-	}
-	args := ar.A.Run[0:]
-	var workDir string
-	if len(ar.F) != 0 {
-		absFilePaths, err := writeFiles(ar.F)
-		if err != nil {
-			exitF("Write files failed")
-		}
-		workDir = filepath.Dir(absFilePaths[0])
-		args = append(ar.A.Run[0:], absFilePaths...)
-	}
-
-	stdOut, stdErr, exitErr := goRun(workDir, ar.I, args...)
-	returnStdOut(stdOut, stdErr, errToStr(exitErr))
-}
-
-func (ar *PayLoad) compileAndRun() {
-	// if no file return
-	if len(ar.F) == 0 {
-		exitF("No fileds are given")
-	}
-	absFilePaths, err := writeFiles(ar.F)
-	if err != nil {
-		exitF("Write files failed")
-	}
-	workDir := filepath.Dir(absFilePaths[0])
+func (pl *PayLoad) runCode() {
 
 	switch {
-	case ar.L == "c" || ar.L == "cpp" || ar.L == "rust":
-		if len(ar.A.Compile) == 0 {
-			switch ar.L {
-			case "c":
-				ar.A.Compile = []string{"gcc"}
-			case "cpp":
-				ar.A.Compile = []string{"g++"}
-			case "rust":
-				ar.A.Compile = []string{"rustc"}
-			}
+	case pl.L == "c" || pl.L == "cpp" || pl.L == "rust":
+		args := []string{}
+		absFilePaths := pl.dealFiles()
+		workDir := filepath.Dir(absFilePaths[0])
+
+		switch pl.L {
+		case "c":
+			args = appendArgs(pl.A.Compile, "gcc")
+		case "cpp":
+			args = appendArgs(pl.A.Compile, "g++")
+		case "rust":
+			args = appendArgs(pl.A.Compile, "rustc")
 		}
+
 		binName := "a.out"
-
-		args := append(ar.A.Compile, []string{"-o", binName}...)
+		args = append(args, []string{"-o", binName}...)
 		args = append(args, absFilePaths...)
-		// compile
-		stdOut, stdErr, exitErr := goRun(workDir, "", args...)
-		if exitErr != nil {
-			if _, ok := exitErr.(*exec.ExitError); ok {
-				returnStdOut(stdOut, stdErr, errToStr(exitErr))
-				exitF("Compile Error")
-			}
-			exitF("Ric goRun Failed")
-		}
-
-		// run
-		binPath := filepath.Join(workDir, binName)
-		args = append(ar.A.Run, binPath)
-
-		stdOut, stdErr, exitErr = goRun(workDir, ar.I, args...)
-		returnStdOut(stdOut, stdErr, errToStr(exitErr))
-
-	case ar.L == "java" || ar.L == "scala":
-		if len(ar.A.Compile) == 0 {
-			if ar.L == "java" {
-				ar.A.Compile = []string{"javac"}
-			} else if ar.L == "scala" {
-				ar.A.Compile = []string{"scalac"}
-			}
-		}
-
-		args := append(ar.A.Compile, absFilePaths...)
-
-		fname := filepath.Base(absFilePaths[0])
-
 		// compile
 		stdOut, stdErr, exitErr := goRun(workDir, "", args...)
 		if exitErr != nil {
@@ -135,66 +63,141 @@ func (ar *PayLoad) compileAndRun() {
 			exitF("Compile Error")
 		}
 
-		if len(ar.A.Run) == 0 {
-			if ar.L == "java" {
-				ar.A.Run = []string{"java"}
-			} else if ar.L == "scala" {
-				ar.A.Run = []string{"scala"}
-			}
-		}
-		args = append(ar.A.Run, javaClassName(fname))
-		stdOut, stdErr, exitErr = goRun(workDir, ar.I, args...)
-		returnStdOut(stdOut, stdErr, errToStr(exitErr))
-
-	case ar.L == "go":
-		if len(ar.A.Compile) == 0 {
-			ar.A.Compile = []string{"go", "build"}
-		}
-		binName := "main"
-
-		args := append(ar.A.Compile, []string{"-o", binName}...)
-		args = append(args, absFilePaths...)
-		// compile
-		stdOut, stdErr, exitErr := goRun(workDir, "", args...)
-		if exitErr != nil {
-			if _, ok := exitErr.(*exec.ExitError); ok {
-				returnStdOut(stdOut, stdErr, errToStr(exitErr))
-				exitF("Compile Error")
-			}
-			exitF("Ric goRun Failed")
-		}
-
 		// run
 		binPath := filepath.Join(workDir, binName)
-		args = append(ar.A.Run, binPath)
+		args = appendArgs(pl.A.Run, binPath)
 
-		stdOut, stdErr, exitErr = goRun(workDir, ar.I, args...)
+		stdOut, stdErr, exitErr = goRun(workDir, pl.I, args...)
 		returnStdOut(stdOut, stdErr, errToStr(exitErr))
 
+	case pl.L == "java":
+		runJava(pl)
+
+	case pl.L == "scala":
+		runScala(pl)
+
 	default:
-		exitF("Unsupported compile language: %s", ar.L)
-	}
-}
 
-func (ar *PayLoad) needCompile() bool {
-	for _, l := range cLanguage {
-		if ar.L == l {
-			return true
+		var args = []string{}
+		switch pl.L {
+		case "haskell":
+			args = appendArgs(pl.A.Compile, "runhaskell")
+		case "go":
+			// maybe there is a better way
+			args = appendArgs(pl.A.Run, "run")
+			args = append([]string{"go"}, args...)
+
+		default:
+			args = appendArgs(pl.A.Run, pl.L)
 		}
+
+		absFilePaths := pl.dealFiles()
+		workDir := filepath.Dir(absFilePaths[0])
+		args = append(args, absFilePaths...)
+
+		stdOut, stdErr, exitErr := goRun(workDir, pl.I, args...)
+		returnStdOut(stdOut, stdErr, errToStr(exitErr))
 	}
-	return false
 }
 
-func (ar *PayLoad) isSupport() bool {
+func (pl *PayLoad) isSupport() bool {
 	for _, l := range supportedLanguage {
-		if ar.L == l {
+		if pl.L == l {
 			return true
 		}
 	}
 	return false
 }
 
-func javaClassName(fname string) string {
-	ext := filepath.Ext(fname)
-	return fname[0 : len(fname)-len(ext)]
+func javaClassName(filename string) string {
+	ext := filepath.Ext(filename)
+	return filename[0 : len(filename)-len(ext)]
+}
+
+// deal files, save file and return those absolute paths
+func (pl *PayLoad) dealFiles() []string {
+	if len(pl.F) == 0 {
+		exitF("No files given")
+	}
+	absFilePaths, err := writeFiles(pl.F)
+	if err != nil {
+		exitF("Write files failed")
+	}
+	return absFilePaths
+}
+
+func runJava(pl *PayLoad) {
+	absFilePaths := pl.dealFiles()
+	workDir := filepath.Dir(absFilePaths[0])
+
+	args := appendArgs(pl.A.Compile, "javac")
+	args = append(args, absFilePaths...)
+
+	filename := filepath.Base(absFilePaths[0])
+
+	// compile
+	stdOut, stdErr, exitErr := goRun(workDir, "", args...)
+	if exitErr != nil {
+		returnStdOut(stdOut, stdErr, errToStr(exitErr))
+		exitF("Compile Error")
+	}
+
+	args = appendArgs(pl.A.Run, "java")
+	args = append(args, javaClassName(filename))
+
+	stdOut, stdErr, exitErr = goRun(workDir, pl.I, args...)
+	returnStdOut(stdOut, stdErr, errToStr(exitErr))
+}
+
+func runScala(pl *PayLoad) {
+	absFilePaths := pl.dealFiles()
+	workDir := filepath.Dir(absFilePaths[0])
+
+	args := appendArgs(pl.A.Compile, "scalac")
+	args = append(args, absFilePaths...)
+
+	filename := filepath.Base(absFilePaths[0])
+
+	// compile
+	stdOut, stdErr, exitErr := goRun(workDir, "", args...)
+	if exitErr != nil {
+		returnStdOut(stdOut, stdErr, errToStr(exitErr))
+		exitF("Compile Error")
+	}
+
+	args = appendArgs(pl.A.Run, "scala")
+	args = append(args, javaClassName(filename))
+
+	stdOut, stdErr, exitErr = goRun(workDir, pl.I, args...)
+	returnStdOut(stdOut, stdErr, errToStr(exitErr))
+}
+
+// if arguments is empty use default argument, or the first argument
+// is not right, put them behind default
+func appendArgs(args []string, def string) []string {
+
+	if argIsEmpty(args) {
+		args = []string{def}
+	} else if args[0] != def {
+		args = append([]string{def}, args...)
+	}
+	return args
+}
+
+func argIsEmpty(args []string) bool {
+
+	if len(args) == 0 {
+		return true
+	}
+
+	var b = []string{}
+	for _, a := range args {
+		if a != "" {
+			b = append(b, a)
+		}
+	}
+	if len(b) == 0 {
+		return true
+	}
+	return false
 }

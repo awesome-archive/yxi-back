@@ -4,42 +4,19 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"io"
-	"time"
-
-	"encoding/json"
-
 	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/pkg/stdcopy"
+	log "github.com/sirupsen/logrus"
 	"golang.org/x/net/context"
+	"io"
+	"time"
 )
-
-// PayLoad as stdin pass to ric container's stdin
-type PayLoad struct {
-	F []*oneFile `json:"files"`
-	A *argument  `json:"argument"`
-	I string     `json:"stdin"`
-	L string     `json:"language"`
-}
-
-type argument struct {
-	Compile []string `json:"compile"`
-	Run     []string `json:"run"`
-}
-
-// file type
-type oneFile struct {
-	Name    string `json:"name"`
-	Content string `json:"content"`
-}
 
 // Worker store all infomations about the run job
 type Worker struct {
 	Image       string // images name
 	containerID string
-	tmpID       string
 	cli         *client.Client
 	ctx         context.Context
 	// ric's stdin stdout stderr
@@ -48,102 +25,15 @@ type Worker struct {
 	ricErr bytes.Buffer
 }
 
-var (
-	MaxOutInBytes    int64 = 2 * 1024 * 1024
-	ErrTooMuchOutPut       = errors.New("Too much out put")
-	ErrWorkerTimeOut       = errors.New("Time out")
-)
-
-// LoadInfo Load payload to worker's stdin
-// language and image info from request url
-func (w *Worker) LoadInfo(p *PayLoad, language, image string) error {
-
-	p.L = language
-
-	js, err := json.Marshal(p)
-	if err != nil {
-		return err
-	}
-	w.ricIn = bytes.NewBuffer(js)
-	w.Image = image
-	return nil
-}
-
 // Run start a worker
 func (w *Worker) Run() (string, string, error) {
 
-	containerJSON, err := w.createContainer()
-	defer func() {
-		err = w.cli.ContainerRemove(w.ctx, w.tmpID, types.ContainerRemoveOptions{})
-		fmt.Println("Container", w.tmpID, "removed")
-		if err != nil {
-			fmt.Println("failed to remove container ", w.tmpID)
-		}
-	}()
-
-	if err != nil {
-		return "", "", err
-	}
-	w.containerID = containerJSON.ID
-	err = w.attachContainer()
+	err := w.attachContainer()
 	if err != nil && w.ricErr.Len() == 0 {
 		return "", "", err
 	}
 
 	return w.ricOut.String(), w.ricErr.String(), nil
-}
-
-func (w *Worker) createContainer() (*types.ContainerJSON, error) {
-	ctx := context.Background()
-	cli, err := client.NewEnvClient()
-	w.cli = cli
-	w.ctx = ctx
-	if err != nil {
-		return nil, err
-	}
-
-	config := &container.Config{
-		Image:        w.Image,
-		Cmd:          []string{"/home/ric/run"},
-		AttachStdin:  true, // Attach the standard input, makes possible user interaction
-		AttachStdout: true, // Attach the standard output
-		AttachStderr: true,
-		Tty:          false,
-		OpenStdin:    true,
-		StdinOnce:    true,
-	}
-	hostConfig := &container.HostConfig{
-		Resources: container.Resources{
-			CPUPeriod: 100000,
-			CPUQuota:  50000,
-			Memory:    100 * 1024 * 1024,
-			// advanced kernel-level features
-			// CPURealtimePeriod : 1000000,
-			// CPURealtimeRuntime: 950000,
-
-			DiskQuota: 5 * 1024 * 1024,
-		},
-		Privileged: false,
-		LogConfig: container.LogConfig{
-			Type: "json-file",
-		},
-	}
-	resp, err := cli.ContainerCreate(ctx, config, hostConfig, nil, "")
-	if err != nil {
-		if resp.ID != "" {
-			w.tmpID = resp.ID
-		}
-		return nil, err
-	}
-	inspect, err := cli.ContainerInspect(ctx, resp.ID)
-	if err != nil {
-		w.tmpID = resp.ID
-		return nil, err
-	}
-	w.containerID = resp.ID
-	w.tmpID = resp.ID
-
-	return &inspect, nil
 }
 
 func (w *Worker) attachContainer() (err error) {
@@ -154,20 +44,20 @@ func (w *Worker) attachContainer() (err error) {
 		Stderr: true,
 	}
 
-	fmt.Println("container", w.containerID, "Attaching...")
+	log.Info("container ", w.containerID, " Attaching...")
 	hijacked, err := w.cli.ContainerAttach(w.ctx, w.containerID, options)
 	if err != nil {
 		return
 	}
 	defer hijacked.Close()
 
-	fmt.Println("Container", w.containerID, "Starting ...")
+	log.Info("container ", w.containerID, " Starting ...")
 	err = w.cli.ContainerStart(w.ctx, w.containerID, types.ContainerStartOptions{})
 	if err != nil {
 		return
 	}
 
-	fmt.Println("Container", w.containerID, "Waiting for attach to finish...")
+	log.Info("container ", w.containerID, " Waiting for attach to finish...")
 	attachCh := make(chan error, 2)
 
 	// Copy any output to the build trace
@@ -197,50 +87,59 @@ func (w *Worker) attachContainer() (err error) {
 
 	select {
 	case <-w.ctx.Done():
-		w.killContainer(w.containerID, waitCh)
+		err = w.killContainer(w.containerID, waitCh)
+		log.Error(err)
 		err = errors.New("Aborted")
 
 	case err = <-attachCh:
-		w.killContainer(w.containerID, waitCh)
-		fmt.Println("Container", w.containerID, "attach finished with", err)
+		errk := w.killContainer(w.containerID, waitCh)
+		if errk != nil {
+			log.Error(errk)
+		}
+
+		log.Info("container ", w.containerID, " attach finished with ", err)
 
 	case err = <-waitCh:
-		fmt.Println("Container", w.containerID, "wait finished with", err)
+		log.Info("container ", w.containerID, " wait finished with ", err)
 
 	case <-time.After(10 * time.Second):
-		w.killContainer(w.containerID, waitCh)
+		errk := w.killContainer(w.containerID, waitCh)
+		if errk != nil {
+			log.Error(errk)
+		}
+
 		err = ErrWorkerTimeOut
-		fmt.Println("Container", w.containerID, "time out")
+		log.Info("container ", w.containerID, " time out")
 	}
 	return
 }
 
 func (w *Worker) waitForContainer() error {
-	fmt.Println("Container", w.containerID, "Waiting...")
+	log.Info("container ", w.containerID, " Waiting...")
 
 	retries := 0
 	// Use active wait
 	for {
 		container, err := w.cli.ContainerInspect(w.ctx, w.containerID)
 		if err != nil {
-			fmt.Println(err.Error())
+			log.Info(err.Error())
 			if client.IsErrNotFound(err) {
 				return err
 			}
 
-			if retries > 3 {
+			if retries > 6 {
 				return err
 			}
 
 			retries++
-			time.Sleep(time.Second)
+			time.Sleep(500 * time.Millisecond)
 			continue
 		}
 
 		// Reset retry timer
 		retries = 0
 		if container.State.Running {
-			time.Sleep(time.Second)
+			time.Sleep(500 * time.Millisecond)
 			continue
 		}
 
@@ -252,17 +151,19 @@ func (w *Worker) waitForContainer() error {
 	}
 }
 
-func (w *Worker) killContainer(id string, waitCh chan error) (err error) {
+func (w *Worker) killContainer(id string, waitCh chan error) error {
 	for {
-
-		fmt.Println("Container", id, "Killing ...")
-		w.cli.ContainerKill(w.ctx, id, "SIGKILL")
-
+		log.Info("container ", id, " Killing ...")
+		err := w.cli.ContainerKill(w.ctx, id, "SIGKILL")
+		if err != nil {
+			log.Error(err)
+			return err
+		}
 		// Wait for signal that container were killed
 		// or retry after some time
 		select {
 		case err = <-waitCh:
-			return
+			return err
 
 		case <-time.After(time.Second):
 		}

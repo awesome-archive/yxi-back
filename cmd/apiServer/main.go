@@ -1,73 +1,68 @@
 package main
 
 import (
-	"io"
-	"os"
-
+	"context"
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
-	"github.com/keller0/yxi-back/handler"
-	mid "github.com/keller0/yxi-back/middleware"
+	"github.com/keller0/scr/cmd/apiServer/handler"
+	"github.com/keller0/scr/internal/docker"
+	"github.com/keller0/scr/internal/env"
+	log "github.com/sirupsen/logrus"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
 )
 
 var (
-	yxiPort    = os.Getenv("YXI_BACK_PORT")
-	ginMode    = os.Getenv(gin.ENV_GIN_MODE)
-	ginLogPath = os.Getenv("GIN_LOG_PATH")
+	yxiPort    = env.Get("YXI_BACK_PORT", ":8090")
+	ginLogPath = env.Get("GIN_LOG_PATH", "/var/log/yxi/api.log")
 )
 
 func main() {
-
-	if ginMode == gin.ReleaseMode {
-		gin.DisableConsoleColor()
-		f, error := os.Create(ginLogPath)
-		if error != nil {
-			panic("create log file failed")
-		}
-		gin.DefaultWriter = io.MultiWriter(f)
-	}
-
-	r := gin.Default()
+	log.Info("starting...")
+	r := gin.New()
 	config := cors.DefaultConfig()
 	config.AllowAllOrigins = true
 	config.AddAllowHeaders("Authorization")
 	r.Use(cors.New(config))
-
-	public := r.Group("/v1")
+	r.Use(gin.Recovery())
+	v1 := r.Group("/v1")
 	{
-		// get code list
-		public.GET("/code", handle.GetCode)
 
-		public.GET("/code/:codeid/*part", handle.GetCodePart)
-		public.POST("/code", handle.NewCode)
-		public.PUT("/code", handle.UpdateCode)
+		v1.GET("/", handler.AllVersion)
+		v1.GET("/:language", handler.VersionsOfOne)
 
-		// get user's code list
-		public.GET("/user/:userid/code", handle.GetOnesCode)
+		v1.POST("/:language", handler.RunCode)
+		v1.POST("/:language/:version", handler.RunCode)
 
-		public.POST("/user", handle.Register)
-		public.POST("/login", handle.Login)
+	}
+	docker.StartManagers()
 
-		run := public.Group("/run")
-		{
-			run.GET("/", handle.AllVersion)
-			run.GET("/:language", handle.VersionsOfOne)
+	srv := &http.Server{Addr: yxiPort, Handler: r}
 
-			rQueue := run.Group("/")
-			rQueue.Use(mid.PublicLimit())
-			{
-				rQueue.POST("/:language", handle.RunCode)
-				rQueue.POST("/:language/:version", handle.RunCode)
-			}
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("listen: %s\n", err)
 		}
+	}()
+
+	quit := make(chan os.Signal)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+	log.Println("Shutdown Server ...")
+	docker.JobStop()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(ctx); err != nil {
+		log.Fatal("Server Shutdown:", err)
 	}
-
-	authorized := r.Group("/v1")
-	authorized.Use(mid.JwtAuth())
-	{
-		authorized.PUT("/likes/:codeid", handle.LikeCode)
+	// catching ctx.Done(). timeout of 5 seconds.
+	select {
+	case <-ctx.Done():
+		log.Println("timeout of 5 seconds.")
 	}
-
-	r.Run(yxiPort)
-
+	log.Println("Server exiting")
+	os.Exit(0)
 }
